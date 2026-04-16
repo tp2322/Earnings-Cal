@@ -449,8 +449,6 @@ if "analyst_emails" not in st.session_state:
     st.session_state.analyst_emails = load_analyst_emails()
 if "upload_meta"    not in st.session_state:
     st.session_state.upload_meta    = load_upload_meta()
-if "pending_import" not in st.session_state:
-    st.session_state.pending_import = None   # DataFrame waiting for analyst assignment
 if "show_upload"    not in st.session_state:
     st.session_state.show_upload    = len(st.session_state.holdings) == 0
 
@@ -484,17 +482,16 @@ has_holdings = len(st.session_state.holdings) > 0
 if has_holdings:
     col_toggle, _ = st.columns([2.5, 6])
     with col_toggle:
-        btn_label = "✕ Cancel upload" if st.session_state.show_upload else "📂 Upload new positions file"
+        btn_label = "✕ Cancel" if st.session_state.show_upload else "📂 Upload new positions file"
         if st.button(btn_label, key="toggle_upload"):
-            st.session_state.show_upload    = not st.session_state.show_upload
-            st.session_state.pending_import = None
+            st.session_state.show_upload = not st.session_state.show_upload
             st.rerun()
 
 if st.session_state.show_upload:
     st.markdown("""
     <div class="upload-box">
       <h3>📂 Upload Positions File</h3>
-      <p>Export your portfolio from Fidelity as a CSV and upload it here.<br>
+      <p>Export your portfolio from Fidelity as a CSV and drop it here.<br>
       Go to <b>Accounts → Positions → Download (↓)</b> and choose <b>CSV</b> format.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -506,104 +503,26 @@ if st.session_state.show_upload:
         key="csv_uploader",
     )
 
-    if uploaded is not None and st.session_state.pending_import is None:
+    if uploaded is not None:
         try:
             parsed_df = parse_fidelity_csv(uploaded.read())
-            st.success(
-                f"✓ Parsed **{len(parsed_df)} positions** from `{uploaded.name}`. "
-                "Assign analysts below, then click **Confirm Import**."
-            )
-            st.session_state.pending_import = {"df": parsed_df, "filename": uploaded.name}
-        except Exception as e:
-            st.error(f"Could not parse file: {e}")
-
-    # ── ANALYST ASSIGNMENT TABLE ──────────────
-    if st.session_state.pending_import is not None:
-        df_import = st.session_state.pending_import["df"]
-        fname     = st.session_state.pending_import["filename"]
-
-        st.markdown(
-            '<div class="section-header" style="margin-top:1.5rem;">Assign Analysts</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            "Assign each position to an analyst. "
-            "Tickers already in your cached holdings are pre-filled."
-        )
-
-        existing_map = {h["ticker"]: h["analyst"] for h in st.session_state.holdings}
-
-        assigned = {}
-        with st.form("analyst_assignment_form"):
-            hdr_cols = st.columns([1.2, 3.5, 2.2, 1.4, 1.4])
-            for lbl, col in zip(["TICKER", "DESCRIPTION", "ANALYST", "QTY", "VALUE"], hdr_cols):
-                col.markdown(
-                    f'<div class="section-header" style="margin-bottom:0.2rem;">{lbl}</div>',
-                    unsafe_allow_html=True,
-                )
-
-            for _, row in df_import.iterrows():
-                ticker  = row["Symbol"]
-                cols    = st.columns([1.2, 3.5, 2.2, 1.4, 1.4])
-                cols[0].markdown(f"**`{ticker}`**")
-                cols[1].markdown(f"<small>{row['Description']}</small>", unsafe_allow_html=True)
-
-                default_analyst = existing_map.get(ticker, "Unassigned")
-                default_idx     = (
-                    ANALYSTS.index(default_analyst)
-                    if default_analyst in ANALYSTS
-                    else ANALYSTS.index("Unassigned")
-                )
-                assigned[ticker] = cols[2].selectbox(
-                    f"analyst_{ticker}",
-                    options=ANALYSTS,
-                    index=default_idx,
-                    label_visibility="collapsed",
-                    key=f"assign_{ticker}",
-                )
-
-                qty = row["Quantity"]
-                val = row["Current Value"]
-                cols[3].markdown(
-                    f"<small style='color:#8b949e'>{qty:,.0f}</small>" if pd.notna(qty) else "<small style='color:#8b949e'>—</small>",
-                    unsafe_allow_html=True,
-                )
-                cols[4].markdown(
-                    f"<small style='color:#8b949e'>${val:,.0f}</small>" if pd.notna(val) else "<small style='color:#8b949e'>—</small>",
-                    unsafe_allow_html=True,
-                )
-
-            submitted = st.form_submit_button("✓ Confirm Import", use_container_width=True)
-
-        if submitted:
-            new_holdings = []
-            for _, row in df_import.iterrows():
-                ticker = row["Symbol"]
-                new_holdings.append({
-                    "ticker":   ticker,
-                    "company":  row["Description"],
-                    "analyst":  assigned.get(ticker, "Unassigned"),
-                    "quantity": float(row["Quantity"])      if pd.notna(row["Quantity"])      else None,
-                    "value":    float(row["Current Value"]) if pd.notna(row["Current Value"]) else None,
-                    "pct":      float(row["Percent Of Account"]) if pd.notna(row["Percent Of Account"]) else None,
-                })
-
+            new_holdings = [
+                {"ticker": row["Symbol"], "company": row["Description"]}
+                for _, row in parsed_df.iterrows()
+            ]
             new_meta = {
-                "filename":    fname,
+                "filename":    uploaded.name,
                 "uploaded_at": datetime.now().strftime("%b %d, %Y %H:%M ET"),
                 "count":       len(new_holdings),
             }
-
-            st.session_state.holdings       = new_holdings
-            st.session_state.upload_meta    = new_meta
-            st.session_state.pending_import = None
-            st.session_state.show_upload    = False
-
+            st.session_state.holdings    = new_holdings
+            st.session_state.upload_meta = new_meta
+            st.session_state.show_upload = False
             save_holdings(new_holdings)
             save_upload_meta(new_meta)
-
-            st.success(f"✓ Imported {len(new_holdings)} positions from {fname}.")
             st.rerun()
+        except Exception as e:
+            st.error(f"Could not parse file: {e}")
 
     st.divider()
 
@@ -622,30 +541,15 @@ if not st.session_state.holdings:
 with st.sidebar:
     st.markdown("## 🏦 MPSIF")
 
-    active_analysts = sorted({h["analyst"] for h in st.session_state.holdings})
-
     show_past = st.checkbox("Show past earnings", value=False)
-
-    st.markdown('<div class="section-header" style="margin-top:1.5rem;">Manual Edits</div>', unsafe_allow_html=True)
 
     tickers_all = [h["ticker"] for h in st.session_state.holdings]
 
-    with st.expander("✏️ Reassign Analyst"):
-        edit_ticker  = st.selectbox("Ticker", tickers_all, key="edit_ticker")
-        cur_analyst  = next((h["analyst"] for h in st.session_state.holdings if h["ticker"] == edit_ticker), "Unassigned")
-        new_analyst  = st.selectbox("New analyst", ANALYSTS, index=ANALYSTS.index(cur_analyst), key="edit_analyst")
-        if st.button("Update"):
-            for h in st.session_state.holdings:
-                if h["ticker"] == edit_ticker:
-                    h["analyst"] = new_analyst
-            save_holdings(st.session_state.holdings)
-            st.success(f"{edit_ticker} → {new_analyst}")
-            st.rerun()
+    st.markdown('<div class="section-header" style="margin-top:1.5rem;">Manual Edits</div>', unsafe_allow_html=True)
 
     with st.expander("➕ Add Position Manually"):
         new_ticker  = st.text_input("Ticker", key="new_ticker").upper().strip()
         new_company = st.text_input("Company Name", key="new_company")
-        new_analyst = st.selectbox("Analyst", ANALYSTS, key="new_analyst")
         if st.button("Add"):
             if new_ticker:
                 if new_ticker in tickers_all:
@@ -653,7 +557,6 @@ with st.sidebar:
                 else:
                     st.session_state.holdings.append({
                         "ticker": new_ticker, "company": new_company or new_ticker,
-                        "analyst": new_analyst, "quantity": None, "value": None, "pct": None,
                     })
                     save_holdings(st.session_state.holdings)
                     st.success(f"Added {new_ticker}")
@@ -668,12 +571,11 @@ with st.sidebar:
             st.rerun()
 
     with st.expander("⚠️ Clear All Data"):
-        st.caption("Wipes the cached holdings and forces a fresh CSV upload.")
+        st.caption("Wipes cached holdings and forces a fresh CSV upload.")
         if st.button("Clear & Re-upload", type="primary"):
-            st.session_state.holdings       = []
-            st.session_state.upload_meta    = {}
-            st.session_state.pending_import = None
-            st.session_state.show_upload    = True
+            st.session_state.holdings    = []
+            st.session_state.upload_meta = {}
+            st.session_state.show_upload = True
             for f in [HOLDINGS_FILE, UPLOAD_META_FILE]:
                 if os.path.exists(f):
                     os.remove(f)
@@ -687,7 +589,7 @@ with st.sidebar:
         smtp_user = st.text_input("From Email", key="smtp_user")
         smtp_pass = st.text_input("App Password", type="password", key="smtp_pass")
 
-    with st.expander("📬 Analyst Emails"):
+    with st.expander("📬 Member Emails"):
         updated_emails = {}
         for a in [x for x in ANALYSTS if x != "Unassigned"]:
             updated_emails[a] = st.text_input(
@@ -699,12 +601,8 @@ with st.sidebar:
             st.success("Saved.")
 
     with st.expander("📨 Send Reminders"):
-        send_to     = st.multiselect(
-            "Send to",
-            [a for a in ANALYSTS if a != "Unassigned"],
-            default=[a for a in active_analysts if a != "Unassigned"],
-            key="send_to",
-        )
+        send_to     = st.multiselect("Send to", [a for a in ANALYSTS if a != "Unassigned"],
+                                     default=[a for a in ANALYSTS if a != "Unassigned"], key="send_to")
         days_filter = st.slider("Holdings with earnings within X days", 1, 90, 30)
         if st.button("Send Reminder Emails"):
             if not smtp_user or not smtp_pass:
@@ -717,8 +615,6 @@ with st.sidebar:
                         continue
                     email_rows = []
                     for h in st.session_state.holdings:
-                        if h["analyst"] != analyst:
-                            continue
                         ed, _, _ = fetch_earnings_date(h["ticker"])
                         n = days_until(ed)
                         if n is not None and 0 <= n <= days_filter:
@@ -747,7 +643,6 @@ with st.spinner("Fetching earnings dates from Yahoo Finance…"):
         rows.append({
             "ticker":        h["ticker"],
             "company":       h.get("company") or h["ticker"],
-            "analyst":       h.get("analyst", "Unassigned"),
             "earnings_date": ed,
             "call_time":     call_time,
             "is_estimate":   is_est,
