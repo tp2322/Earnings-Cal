@@ -1,18 +1,20 @@
 """
 MPSIF Earnings Calendar
 A Streamlit app for tracking earnings dates across fund holdings.
+Supports Fidelity CSV portfolio export with per-analyst assignment.
 """
 
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 import calendar
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import json
 import os
+import io
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -31,21 +33,14 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
-    html, body, [class*="css"] {
-        font-family: 'IBM Plex Sans', sans-serif;
-    }
+    html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
-    .stApp {
-        background-color: #0d1117;
-        color: #e6edf3;
-    }
+    .stApp { background-color: #0d1117; color: #e6edf3; }
 
-    /* Sidebar */
     section[data-testid="stSidebar"] {
         background-color: #161b22;
         border-right: 1px solid #30363d;
     }
-
     section[data-testid="stSidebar"] .stMarkdown h2 {
         color: #58a6ff;
         font-family: 'IBM Plex Mono', monospace;
@@ -55,7 +50,6 @@ st.markdown("""
         margin-bottom: 0.5rem;
     }
 
-    /* Main header */
     .main-header {
         font-family: 'IBM Plex Mono', monospace;
         font-size: 1.8rem;
@@ -72,7 +66,6 @@ st.markdown("""
         margin-bottom: 1.5rem;
     }
 
-    /* Metric cards */
     .metric-card {
         background: #161b22;
         border: 1px solid #30363d;
@@ -93,7 +86,6 @@ st.markdown("""
         letter-spacing: 0.08em;
     }
 
-    /* Earnings row badge */
     .badge {
         display: inline-block;
         padding: 2px 8px;
@@ -102,28 +94,11 @@ st.markdown("""
         font-family: 'IBM Plex Mono', monospace;
         font-weight: 600;
     }
-    .badge-soon {
-        background: #1f3a1f;
-        color: #3fb950;
-        border: 1px solid #3fb950;
-    }
-    .badge-upcoming {
-        background: #1f2d3f;
-        color: #58a6ff;
-        border: 1px solid #58a6ff;
-    }
-    .badge-past {
-        background: #1e1e1e;
-        color: #8b949e;
-        border: 1px solid #30363d;
-    }
-    .badge-bmc {
-        background: #2d1f0e;
-        color: #d29922;
-        border: 1px solid #d29922;
-    }
+    .badge-soon    { background:#1f3a1f; color:#3fb950; border:1px solid #3fb950; }
+    .badge-upcoming{ background:#1f2d3f; color:#58a6ff; border:1px solid #58a6ff; }
+    .badge-past    { background:#1e1e1e; color:#8b949e; border:1px solid #30363d; }
+    .badge-bmc     { background:#2d1f0e; color:#d29922; border:1px solid #d29922; }
 
-    /* Calendar cell */
     .cal-cell {
         background: #161b22;
         border: 1px solid #30363d;
@@ -132,20 +107,9 @@ st.markdown("""
         min-height: 80px;
         vertical-align: top;
     }
-    .cal-cell-today {
-        border-color: #58a6ff;
-        background: #0d2044;
-    }
-    .cal-day-num {
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.75rem;
-        color: #8b949e;
-        margin-bottom: 4px;
-    }
-    .cal-day-num-today {
-        color: #58a6ff;
-        font-weight: 700;
-    }
+    .cal-cell-today   { border-color: #58a6ff; background: #0d2044; }
+    .cal-day-num      { font-family:'IBM Plex Mono',monospace; font-size:0.75rem; color:#8b949e; margin-bottom:4px; }
+    .cal-day-num-today{ color:#58a6ff; font-weight:700; }
     .cal-event {
         background: #1f3a1f;
         color: #3fb950;
@@ -159,12 +123,8 @@ st.markdown("""
         text-overflow: ellipsis;
         max-width: 100%;
     }
-    .cal-event-past {
-        background: #1e1e1e;
-        color: #8b949e;
-    }
+    .cal-event-past { background:#1e1e1e; color:#8b949e; }
 
-    /* Section header */
     .section-header {
         font-family: 'IBM Plex Mono', monospace;
         font-size: 0.8rem;
@@ -176,26 +136,44 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
-    /* Stale data warning */
-    .stale-badge {
-        font-size: 0.7rem;
-        color: #d29922;
+    .upload-box {
+        background: #161b22;
+        border: 2px dashed #30363d;
+        border-radius: 12px;
+        padding: 2.5rem 2rem;
+        text-align: center;
+        margin: 1.5rem 0;
+    }
+    .upload-box h3 {
         font-family: 'IBM Plex Mono', monospace;
+        color: #58a6ff;
+        margin-bottom: 0.5rem;
+    }
+    .upload-box p { color: #8b949e; font-size: 0.9rem; }
+
+    .cache-pill {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.72rem;
+        background: #1f2d3f;
+        color: #58a6ff;
+        border: 1px solid #58a6ff;
+        margin-left: 8px;
+    }
+    .cache-pill-warn {
+        background: #2d1f0e;
+        color: #d29922;
+        border-color: #d29922;
     }
 
-    /* Hide streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    #MainMenu {visibility:hidden;}
+    footer      {visibility:hidden;}
+    header      {visibility:hidden;}
 
-    /* Streamlit table overrides */
-    .stDataFrame {
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        overflow: hidden;
-    }
+    .stDataFrame { border:1px solid #30363d; border-radius:8px; overflow:hidden; }
 
-    /* Buttons */
     .stButton > button {
         background: #21262d;
         color: #e6edf3;
@@ -210,60 +188,40 @@ st.markdown("""
         color: #58a6ff;
     }
 
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        background: transparent;
-        border-bottom: 1px solid #30363d;
-    }
-    .stTabs [data-baseweb="tab"] {
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.8rem;
-        color: #8b949e;
-    }
-    .stTabs [aria-selected="true"] {
-        color: #58a6ff !important;
-        border-bottom: 2px solid #58a6ff !important;
-    }
+    .stTabs [data-baseweb="tab-list"] { background:transparent; border-bottom:1px solid #30363d; }
+    .stTabs [data-baseweb="tab"]      { font-family:'IBM Plex Mono',monospace; font-size:0.8rem; color:#8b949e; }
+    .stTabs [aria-selected="true"]    { color:#58a6ff !important; border-bottom:2px solid #58a6ff !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
-# CONSTANTS & DEFAULT DATA
+# CONSTANTS
 # ─────────────────────────────────────────────
 ANALYSTS = [
     "Augustine", "Zach", "Kartik", "Nihir",
-    "Boid", "Jake", "Tejas", "Sina", "Leah", "Rachel"
+    "Boid", "Jake", "Tejas", "Sina", "Leah", "Rachel",
+    "Unassigned",
 ]
 
-# Default holdings — edit or replace via the sidebar UI
-DEFAULT_HOLDINGS = [
-    {"ticker": "AAPL",  "company": "Apple Inc.",               "analyst": "Tejas"},
-    {"ticker": "MSFT",  "company": "Microsoft Corp.",           "analyst": "Zach"},
-    {"ticker": "GOOGL", "company": "Alphabet Inc.",             "analyst": "Kartik"},
-    {"ticker": "AMZN",  "company": "Amazon.com Inc.",           "analyst": "Nihir"},
-    {"ticker": "META",  "company": "Meta Platforms Inc.",       "analyst": "Boid"},
-    {"ticker": "NVDA",  "company": "NVIDIA Corp.",              "analyst": "Jake"},
-    {"ticker": "JPM",   "company": "JPMorgan Chase & Co.",      "analyst": "Augustine"},
-    {"ticker": "UNH",   "company": "UnitedHealth Group Inc.",   "analyst": "Sina"},
-    {"ticker": "V",     "company": "Visa Inc.",                 "analyst": "Leah"},
-    {"ticker": "HD",    "company": "The Home Depot Inc.",       "analyst": "Rachel"},
-]
-
-HOLDINGS_FILE = "mpsif_holdings.json"
+HOLDINGS_FILE       = "mpsif_holdings.json"
 ANALYST_EMAILS_FILE = "mpsif_analyst_emails.json"
+UPLOAD_META_FILE    = "mpsif_upload_meta.json"
 
-DEFAULT_ANALYST_EMAILS = {a: f"{a.lower()}@stern.nyu.edu" for a in ANALYSTS}
+DEFAULT_ANALYST_EMAILS = {a: f"{a.lower()}@stern.nyu.edu" for a in ANALYSTS if a != "Unassigned"}
+
+# Symbols to skip in Fidelity exports (money market, cash, etc.)
+SKIP_SYMBOLS = {"SPAXX**", "SPAXX", "FDRXX", "FZFXX", "FCASH"}
 
 
 # ─────────────────────────────────────────────
-# STATE HELPERS
+# PERSISTENCE HELPERS
 # ─────────────────────────────────────────────
 def load_holdings():
     if os.path.exists(HOLDINGS_FILE):
         with open(HOLDINGS_FILE) as f:
             return json.load(f)
-    return DEFAULT_HOLDINGS
+    return []
 
 def save_holdings(holdings):
     with open(HOLDINGS_FILE, "w") as f:
@@ -273,11 +231,70 @@ def load_analyst_emails():
     if os.path.exists(ANALYST_EMAILS_FILE):
         with open(ANALYST_EMAILS_FILE) as f:
             return json.load(f)
-    return DEFAULT_ANALYST_EMAILS
+    return DEFAULT_ANALYST_EMAILS.copy()
 
 def save_analyst_emails(emails):
     with open(ANALYST_EMAILS_FILE, "w") as f:
         json.dump(emails, f, indent=2)
+
+def load_upload_meta():
+    if os.path.exists(UPLOAD_META_FILE):
+        with open(UPLOAD_META_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_upload_meta(meta):
+    with open(UPLOAD_META_FILE, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
+# ─────────────────────────────────────────────
+# FIDELITY CSV PARSER
+# ─────────────────────────────────────────────
+def parse_fidelity_csv(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Parse a Fidelity portfolio CSV export.
+    Stops at the blank line that precedes the footer disclaimers.
+    Returns cleaned DataFrame with equity positions only.
+    """
+    text = file_bytes.decode("utf-8-sig")   # strips BOM
+
+    data_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            break           # blank line = start of footer
+        if stripped.startswith('"'):
+            break           # quoted disclaimer
+        data_lines.append(line)
+
+    if not data_lines:
+        raise ValueError("Could not find data rows in the uploaded CSV.")
+
+    df = pd.read_csv(io.StringIO("\n".join(data_lines)))
+    df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
+
+    # Drop non-equity rows
+    df = df[df["Symbol"].notna()]
+    df = df[~df["Symbol"].str.strip().isin(SKIP_SYMBOLS)]
+    df = df[~df["Description"].str.lower().str.contains("pending", na=False)]
+
+    # Sanitise numeric columns
+    for col in ["Last Price", "Current Value", "Percent Of Account", "Quantity"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(r"[$+,%]", "", regex=True)
+                .str.strip()
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["Symbol"]      = df["Symbol"].str.strip()
+    df["Description"] = df["Description"].str.strip().str.title()
+
+    keep = ["Symbol", "Description", "Quantity", "Last Price",
+            "Current Value", "Percent Of Account"]
+    return df[keep].reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────
@@ -285,35 +302,29 @@ def save_analyst_emails(emails):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_earnings_date(ticker: str):
-    """
-    Returns (date_obj_or_None, time_str, is_estimate_bool)
-    Tries calendar endpoint first, falls back to info dict.
-    """
     try:
         tk = yf.Ticker(ticker)
-
-        # --- Primary: earnings_dates DataFrame ---
         try:
             edf = tk.earnings_dates
             if edf is not None and not edf.empty:
-                today = pd.Timestamp.today(tz="UTC")
-                # Only look up to 365 days out
-                window = today + pd.Timedelta(days=365)
-                future = edf[edf.index >= today - pd.Timedelta(days=5)]
-                future = future[future.index <= window]
+                today_ts = pd.Timestamp.today(tz="UTC")
+                window   = today_ts + pd.Timedelta(days=365)
+                future   = edf[
+                    (edf.index >= today_ts - pd.Timedelta(days=5)) &
+                    (edf.index <= window)
+                ]
                 if not future.empty:
                     next_date = future.index.min()
-                    eps_estimate = future.loc[next_date, "EPS Estimate"] if "EPS Estimate" in future.columns else None
-                    is_estimate = pd.isna(eps_estimate)
-                    # "Before Market Open" / "After Market Close" hint from column
+                    eps_est   = future.loc[next_date, "EPS Estimate"] if "EPS Estimate" in future.columns else None
+                    is_est    = pd.isna(eps_est)
                     call_time = ""
                     if "Call Time" in future.columns:
-                        call_time = str(future.loc[next_date, "Call Time"]) if not pd.isna(future.loc[next_date, "Call Time"]) else ""
-                    return next_date.date(), call_time, is_estimate
+                        v = future.loc[next_date, "Call Time"]
+                        call_time = "" if pd.isna(v) else str(v)
+                    return next_date.date(), call_time, is_est
         except Exception:
             pass
 
-        # --- Fallback: info dict ---
         info = tk.info
         for key in ("earningsDate", "earningsTimestamp", "earningsTimestampStart"):
             raw = info.get(key)
@@ -321,97 +332,84 @@ def fetch_earnings_date(ticker: str):
                 if isinstance(raw, (list, tuple)):
                     raw = raw[0]
                 try:
-                    dt = datetime.fromtimestamp(int(raw)).date()
-                    return dt, "", True
+                    return datetime.fromtimestamp(int(raw)).date(), "", True
                 except Exception:
                     pass
-
     except Exception:
         pass
-
     return None, "", True
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_info(ticker: str):
-    """Returns dict with sector, marketCap, shortName."""
     try:
         info = yf.Ticker(ticker).info
         return {
-            "sector": info.get("sector", "—"),
+            "sector":     info.get("sector", "—"),
             "market_cap": info.get("marketCap"),
-            "name": info.get("shortName", ticker),
+            "name":       info.get("shortName", ticker),
         }
     except Exception:
         return {"sector": "—", "market_cap": None, "name": ticker}
 
 
 def days_until(d):
-    if d is None:
-        return None
-    return (d - date.today()).days
-
+    return (d - date.today()).days if d else None
 
 def fmt_market_cap(mc):
-    if mc is None:
-        return "—"
-    if mc >= 1e12:
-        return f"${mc/1e12:.1f}T"
-    if mc >= 1e9:
-        return f"${mc/1e9:.1f}B"
+    if mc is None: return "—"
+    if mc >= 1e12: return f"${mc/1e12:.1f}T"
+    if mc >= 1e9:  return f"${mc/1e9:.1f}B"
     return f"${mc/1e6:.0f}M"
-
 
 def earnings_badge(d):
     if d is None:
         return '<span class="badge badge-past">TBD</span>'
     n = days_until(d)
-    if n is None:
-        return '<span class="badge badge-past">TBD</span>'
-    if n < 0:
-        return f'<span class="badge badge-past">{d.strftime("%b %d")}</span>'
-    if n <= 7:
-        return f'<span class="badge badge-soon">in {n}d</span>'
-    if n <= 30:
-        return f'<span class="badge badge-upcoming">in {n}d</span>'
+    if n is None:  return '<span class="badge badge-past">TBD</span>'
+    if n < 0:      return f'<span class="badge badge-past">{d.strftime("%b %d")}</span>'
+    if n <= 7:     return f'<span class="badge badge-soon">in {n}d</span>'
+    if n <= 30:    return f'<span class="badge badge-upcoming">in {n}d</span>'
     return f'<span class="badge badge-bmc">{d.strftime("%b %d")}</span>'
 
 
 # ─────────────────────────────────────────────
 # EMAIL HELPER
 # ─────────────────────────────────────────────
-def send_earnings_reminder(
-    smtp_host, smtp_port, smtp_user, smtp_pass,
-    to_email, analyst_name, holdings_rows
-):
-    """Send an earnings reminder email to one analyst."""
+def send_earnings_reminder(smtp_host, smtp_port, smtp_user, smtp_pass,
+                           to_email, analyst_name, holdings_rows):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"MPSIF Earnings Reminder — {analyst_name}"
-    msg["From"] = smtp_user
-    msg["To"] = to_email
+    msg["From"]    = smtp_user
+    msg["To"]      = to_email
 
     rows_html = ""
     for row in holdings_rows:
         d = row["earnings_date"]
         n = days_until(d) if d else None
-        days_str = f"in {n} day{'s' if n != 1 else ''}" if n is not None and n >= 0 else (d.strftime("%b %d") if d else "TBD")
+        days_str = (
+            f"in {n} day{'s' if n != 1 else ''}"
+            if (n is not None and n >= 0)
+            else (d.strftime("%b %d") if d else "TBD")
+        )
         rows_html += f"""
         <tr>
           <td style="padding:8px 12px;font-family:monospace;font-weight:600;">{row['ticker']}</td>
           <td style="padding:8px 12px;">{row['company']}</td>
           <td style="padding:8px 12px;font-family:monospace;">{d.strftime('%B %d, %Y') if d else 'TBD'}</td>
           <td style="padding:8px 12px;color:#3fb950;font-family:monospace;">{days_str}</td>
-        </tr>
-        """
+        </tr>"""
 
-    html = f"""
-    <html><body style="background:#0d1117;color:#e6edf3;font-family:'IBM Plex Sans',sans-serif;padding:24px;">
+    html = f"""<html><body style="background:#0d1117;color:#e6edf3;
+        font-family:'IBM Plex Sans',sans-serif;padding:24px;">
       <h2 style="color:#58a6ff;font-family:monospace;">MPSIF — Earnings Reminder</h2>
       <p>Hi {analyst_name},</p>
       <p>Here are the upcoming earnings dates for your holdings:</p>
-      <table style="border-collapse:collapse;width:100%;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+      <table style="border-collapse:collapse;width:100%;background:#161b22;
+          border:1px solid #30363d;border-radius:8px;">
         <thead>
-          <tr style="background:#21262d;color:#8b949e;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.08em;">
+          <tr style="background:#21262d;color:#8b949e;font-size:0.8rem;
+              text-transform:uppercase;letter-spacing:0.08em;">
             <th style="padding:8px 12px;text-align:left;">Ticker</th>
             <th style="padding:8px 12px;text-align:left;">Company</th>
             <th style="padding:8px 12px;text-align:left;">Earnings Date</th>
@@ -420,11 +418,11 @@ def send_earnings_reminder(
         </thead>
         <tbody>{rows_html}</tbody>
       </table>
-      <p style="color:#8b949e;font-size:0.85rem;margin-top:24px;">— MPSIF Earnings Calendar</p>
-    </body></html>
-    """
-    msg.attach(MIMEText(html, "html"))
+      <p style="color:#8b949e;font-size:0.85rem;margin-top:24px;">
+        — MPSIF Earnings Calendar</p>
+    </body></html>"""
 
+    msg.attach(MIMEText(html, "html"))
     with smtplib.SMTP(smtp_host, int(smtp_port)) as server:
         server.starttls()
         server.login(smtp_user, smtp_pass)
@@ -434,12 +432,177 @@ def send_earnings_reminder(
 # ─────────────────────────────────────────────
 # SESSION STATE INIT
 # ─────────────────────────────────────────────
-if "holdings" not in st.session_state:
-    st.session_state.holdings = load_holdings()
+if "holdings"       not in st.session_state:
+    st.session_state.holdings       = load_holdings()
 if "analyst_emails" not in st.session_state:
     st.session_state.analyst_emails = load_analyst_emails()
-if "earnings_cache" not in st.session_state:
-    st.session_state.earnings_cache = {}
+if "upload_meta"    not in st.session_state:
+    st.session_state.upload_meta    = load_upload_meta()
+if "pending_import" not in st.session_state:
+    st.session_state.pending_import = None   # DataFrame waiting for analyst assignment
+if "show_upload"    not in st.session_state:
+    st.session_state.show_upload    = len(st.session_state.holdings) == 0
+
+
+# ─────────────────────────────────────────────
+# HEADER
+# ─────────────────────────────────────────────
+st.markdown('<h1 class="main-header">MPSIF Earnings Calendar</h1>', unsafe_allow_html=True)
+
+meta = st.session_state.upload_meta
+if meta.get("filename"):
+    st.markdown(
+        f'<p class="main-subheader">Long-only equity fund · NYU Stern · '
+        f'Positions from <span class="cache-pill">{meta["filename"]}</span> '
+        f'<span class="cache-pill cache-pill-warn">uploaded {meta.get("uploaded_at","")}</span></p>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<p class="main-subheader">Long-only equity fund · NYU Stern · '
+        'Upload a Fidelity positions CSV to get started</p>',
+        unsafe_allow_html=True,
+    )
+
+
+# ─────────────────────────────────────────────
+# UPLOAD / IMPORT FLOW
+# ─────────────────────────────────────────────
+has_holdings = len(st.session_state.holdings) > 0
+
+if has_holdings:
+    col_toggle, _ = st.columns([2.5, 6])
+    with col_toggle:
+        btn_label = "✕ Cancel upload" if st.session_state.show_upload else "📂 Upload new positions file"
+        if st.button(btn_label, key="toggle_upload"):
+            st.session_state.show_upload    = not st.session_state.show_upload
+            st.session_state.pending_import = None
+            st.rerun()
+
+if st.session_state.show_upload:
+    st.markdown("""
+    <div class="upload-box">
+      <h3>📂 Upload Positions File</h3>
+      <p>Export your portfolio from Fidelity as a CSV and upload it here.<br>
+      Go to <b>Accounts → Positions → Download (↓)</b> and choose <b>CSV</b> format.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "Drop your Fidelity CSV here",
+        type=["csv"],
+        label_visibility="collapsed",
+        key="csv_uploader",
+    )
+
+    if uploaded is not None and st.session_state.pending_import is None:
+        try:
+            parsed_df = parse_fidelity_csv(uploaded.read())
+            st.success(
+                f"✓ Parsed **{len(parsed_df)} positions** from `{uploaded.name}`. "
+                "Assign analysts below, then click **Confirm Import**."
+            )
+            st.session_state.pending_import = {"df": parsed_df, "filename": uploaded.name}
+        except Exception as e:
+            st.error(f"Could not parse file: {e}")
+
+    # ── ANALYST ASSIGNMENT TABLE ──────────────
+    if st.session_state.pending_import is not None:
+        df_import = st.session_state.pending_import["df"]
+        fname     = st.session_state.pending_import["filename"]
+
+        st.markdown(
+            '<div class="section-header" style="margin-top:1.5rem;">Assign Analysts</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Assign each position to an analyst. "
+            "Tickers already in your cached holdings are pre-filled."
+        )
+
+        existing_map = {h["ticker"]: h["analyst"] for h in st.session_state.holdings}
+
+        assigned = {}
+        with st.form("analyst_assignment_form"):
+            hdr_cols = st.columns([1.2, 3.5, 2.2, 1.4, 1.4])
+            for lbl, col in zip(["TICKER", "DESCRIPTION", "ANALYST", "QTY", "VALUE"], hdr_cols):
+                col.markdown(
+                    f'<div class="section-header" style="margin-bottom:0.2rem;">{lbl}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            for _, row in df_import.iterrows():
+                ticker  = row["Symbol"]
+                cols    = st.columns([1.2, 3.5, 2.2, 1.4, 1.4])
+                cols[0].markdown(f"**`{ticker}`**")
+                cols[1].markdown(f"<small>{row['Description']}</small>", unsafe_allow_html=True)
+
+                default_analyst = existing_map.get(ticker, "Unassigned")
+                default_idx     = (
+                    ANALYSTS.index(default_analyst)
+                    if default_analyst in ANALYSTS
+                    else ANALYSTS.index("Unassigned")
+                )
+                assigned[ticker] = cols[2].selectbox(
+                    f"analyst_{ticker}",
+                    options=ANALYSTS,
+                    index=default_idx,
+                    label_visibility="collapsed",
+                    key=f"assign_{ticker}",
+                )
+
+                qty = row["Quantity"]
+                val = row["Current Value"]
+                cols[3].markdown(
+                    f"<small style='color:#8b949e'>{qty:,.0f}</small>" if pd.notna(qty) else "<small style='color:#8b949e'>—</small>",
+                    unsafe_allow_html=True,
+                )
+                cols[4].markdown(
+                    f"<small style='color:#8b949e'>${val:,.0f}</small>" if pd.notna(val) else "<small style='color:#8b949e'>—</small>",
+                    unsafe_allow_html=True,
+                )
+
+            submitted = st.form_submit_button("✓ Confirm Import", use_container_width=True)
+
+        if submitted:
+            new_holdings = []
+            for _, row in df_import.iterrows():
+                ticker = row["Symbol"]
+                new_holdings.append({
+                    "ticker":   ticker,
+                    "company":  row["Description"],
+                    "analyst":  assigned.get(ticker, "Unassigned"),
+                    "quantity": float(row["Quantity"])      if pd.notna(row["Quantity"])      else None,
+                    "value":    float(row["Current Value"]) if pd.notna(row["Current Value"]) else None,
+                    "pct":      float(row["Percent Of Account"]) if pd.notna(row["Percent Of Account"]) else None,
+                })
+
+            new_meta = {
+                "filename":    fname,
+                "uploaded_at": datetime.now().strftime("%b %d, %Y %H:%M ET"),
+                "count":       len(new_holdings),
+            }
+
+            st.session_state.holdings       = new_holdings
+            st.session_state.upload_meta    = new_meta
+            st.session_state.pending_import = None
+            st.session_state.show_upload    = False
+
+            save_holdings(new_holdings)
+            save_upload_meta(new_meta)
+
+            st.success(f"✓ Imported {len(new_holdings)} positions from {fname}.")
+            st.rerun()
+
+    st.divider()
+
+
+# ─────────────────────────────────────────────
+# GUARD: nothing loaded yet
+# ─────────────────────────────────────────────
+if not st.session_state.holdings:
+    st.info("No positions loaded yet. Upload a Fidelity CSV above to get started.")
+    st.stop()
 
 
 # ─────────────────────────────────────────────
@@ -449,43 +612,53 @@ with st.sidebar:
     st.markdown("## 🏦 MPSIF")
     st.markdown('<div class="section-header">Filter</div>', unsafe_allow_html=True)
 
+    active_analysts = sorted({h["analyst"] for h in st.session_state.holdings})
     selected_analysts = st.multiselect(
         "Analyst",
-        options=ANALYSTS,
-        default=ANALYSTS,
+        options=active_analysts,
+        default=active_analysts,
         label_visibility="collapsed",
     )
 
     show_past = st.checkbox("Show past earnings", value=False)
 
-    st.markdown('<div class="section-header" style="margin-top:1.5rem;">Manage Holdings</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header" style="margin-top:1.5rem;">Manual Edits</div>', unsafe_allow_html=True)
 
-    with st.expander("➕ Add Holding"):
-        new_ticker = st.text_input("Ticker", key="new_ticker").upper().strip()
+    tickers_all = [h["ticker"] for h in st.session_state.holdings]
+
+    with st.expander("✏️ Reassign Analyst"):
+        edit_ticker  = st.selectbox("Ticker", tickers_all, key="edit_ticker")
+        cur_analyst  = next((h["analyst"] for h in st.session_state.holdings if h["ticker"] == edit_ticker), "Unassigned")
+        new_analyst  = st.selectbox("New analyst", ANALYSTS, index=ANALYSTS.index(cur_analyst), key="edit_analyst")
+        if st.button("Update"):
+            for h in st.session_state.holdings:
+                if h["ticker"] == edit_ticker:
+                    h["analyst"] = new_analyst
+            save_holdings(st.session_state.holdings)
+            st.success(f"{edit_ticker} → {new_analyst}")
+            st.rerun()
+
+    with st.expander("➕ Add Position Manually"):
+        new_ticker  = st.text_input("Ticker", key="new_ticker").upper().strip()
         new_company = st.text_input("Company Name", key="new_company")
         new_analyst = st.selectbox("Analyst", ANALYSTS, key="new_analyst")
         if st.button("Add"):
             if new_ticker:
-                existing = [h["ticker"] for h in st.session_state.holdings]
-                if new_ticker in existing:
+                if new_ticker in tickers_all:
                     st.error("Ticker already exists.")
                 else:
                     st.session_state.holdings.append({
-                        "ticker": new_ticker,
-                        "company": new_company or new_ticker,
-                        "analyst": new_analyst,
+                        "ticker": new_ticker, "company": new_company or new_ticker,
+                        "analyst": new_analyst, "quantity": None, "value": None, "pct": None,
                     })
                     save_holdings(st.session_state.holdings)
                     st.success(f"Added {new_ticker}")
                     st.rerun()
 
-    with st.expander("🗑️ Remove Holding"):
-        tickers_to_remove = [h["ticker"] for h in st.session_state.holdings]
-        remove_ticker = st.selectbox("Select ticker", tickers_to_remove, key="remove_ticker")
+    with st.expander("🗑️ Remove Position"):
+        remove_ticker = st.selectbox("Select ticker", tickers_all, key="remove_ticker")
         if st.button("Remove"):
-            st.session_state.holdings = [
-                h for h in st.session_state.holdings if h["ticker"] != remove_ticker
-            ]
+            st.session_state.holdings = [h for h in st.session_state.holdings if h["ticker"] != remove_ticker]
             save_holdings(st.session_state.holdings)
             st.success(f"Removed {remove_ticker}")
             st.rerun()
@@ -500,7 +673,7 @@ with st.sidebar:
 
     with st.expander("📬 Analyst Emails"):
         updated_emails = {}
-        for a in ANALYSTS:
+        for a in [x for x in ANALYSTS if x != "Unassigned"]:
             updated_emails[a] = st.text_input(
                 a, value=st.session_state.analyst_emails.get(a, ""), key=f"email_{a}"
             )
@@ -510,31 +683,36 @@ with st.sidebar:
             st.success("Saved.")
 
     with st.expander("📨 Send Reminders"):
-        send_to = st.multiselect("Send to", ANALYSTS, default=ANALYSTS, key="send_to")
-        days_filter = st.slider("Only holdings with earnings within X days", 1, 90, 30)
+        send_to     = st.multiselect(
+            "Send to",
+            [a for a in ANALYSTS if a != "Unassigned"],
+            default=[a for a in active_analysts if a != "Unassigned"],
+            key="send_to",
+        )
+        days_filter = st.slider("Holdings with earnings within X days", 1, 90, 30)
         if st.button("Send Reminder Emails"):
             if not smtp_user or not smtp_pass:
                 st.error("Please fill in SMTP settings above.")
             else:
-                sent, failed = 0, 0
+                sent = failed = 0
                 for analyst in send_to:
                     email = st.session_state.analyst_emails.get(analyst, "")
                     if not email:
                         continue
-                    rows = []
+                    email_rows = []
                     for h in st.session_state.holdings:
                         if h["analyst"] != analyst:
                             continue
                         ed, _, _ = fetch_earnings_date(h["ticker"])
                         n = days_until(ed)
                         if n is not None and 0 <= n <= days_filter:
-                            rows.append({**h, "earnings_date": ed})
-                    if not rows:
+                            email_rows.append({**h, "earnings_date": ed})
+                    if not email_rows:
                         continue
                     try:
                         send_earnings_reminder(
                             smtp_host, smtp_port, smtp_user, smtp_pass,
-                            email, analyst, rows
+                            email, analyst, email_rows,
                         )
                         sent += 1
                     except Exception as e:
@@ -544,84 +722,77 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────────
-# MAIN CONTENT
+# BUILD ENRICHED TABLE
 # ─────────────────────────────────────────────
-st.markdown('<h1 class="main-header">MPSIF Earnings Calendar</h1>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="main-subheader">Long-only equity fund · NYU Stern · Real-time earnings tracking via Yahoo Finance</p>',
-    unsafe_allow_html=True
-)
-
-# ── Build enriched holdings table ──────────────
 filtered = [h for h in st.session_state.holdings if h["analyst"] in selected_analysts]
 
-with st.spinner("Fetching earnings dates…"):
+with st.spinner("Fetching earnings dates from Yahoo Finance…"):
     rows = []
     for h in filtered:
         ed, call_time, is_est = fetch_earnings_date(h["ticker"])
         info = fetch_stock_info(h["ticker"])
-        n = days_until(ed)
         rows.append({
-            "ticker": h["ticker"],
-            "company": h.get("company") or info["name"],
-            "analyst": h["analyst"],
-            "sector": info["sector"],
-            "market_cap": fmt_market_cap(info["market_cap"]),
+            "ticker":        h["ticker"],
+            "company":       h.get("company") or info["name"],
+            "analyst":       h["analyst"],
+            "sector":        info["sector"],
+            "market_cap":    fmt_market_cap(info["market_cap"]),
+            "pct":           f"{h['pct']:.2f}%" if h.get("pct") else "—",
             "earnings_date": ed,
-            "call_time": call_time,
-            "is_estimate": is_est,
-            "days_until": n,
+            "call_time":     call_time,
+            "is_estimate":   is_est,
+            "days_until":    days_until(ed),
         })
 
-df = pd.DataFrame(rows)
 
-# ── Summary metrics ────────────────────────────
-today = date.today()
-this_week = [r for r in rows if r["days_until"] is not None and 0 <= r["days_until"] <= 7]
+# ─────────────────────────────────────────────
+# SUMMARY METRICS
+# ─────────────────────────────────────────────
+today      = date.today()
+this_week  = [r for r in rows if r["days_until"] is not None and 0 <= r["days_until"] <= 7]
 this_month = [r for r in rows if r["days_until"] is not None and 0 <= r["days_until"] <= 30]
-no_date = [r for r in rows if r["earnings_date"] is None]
+no_date    = [r for r in rows if r["earnings_date"] is None]
 
 c1, c2, c3, c4 = st.columns(4)
 for col, val, label in [
-    (c1, len(rows), "Total Holdings"),
-    (c2, len(this_week), "Earnings This Week"),
+    (c1, len(rows),       "Total Holdings"),
+    (c2, len(this_week),  "Earnings This Week"),
     (c3, len(this_month), "Earnings This Month"),
-    (c4, len(no_date), "Date TBD"),
+    (c4, len(no_date),    "Date TBD"),
 ]:
     col.markdown(f"""
     <div class="metric-card">
       <div class="metric-value">{val}</div>
       <div class="metric-label">{label}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────
-# TABS: LIST VIEW  |  CALENDAR VIEW
+# TABS
 # ─────────────────────────────────────────────
 tab_list, tab_cal = st.tabs(["📋  List View", "📅  Calendar View"])
 
 
-# ── LIST VIEW ─────────────────────────────────
+# ── LIST VIEW ────────────────────────────────
 with tab_list:
-    # Sort options
-    sort_col, _, filter_col = st.columns([2, 3, 2])
+    sort_col, _ = st.columns([2, 6])
     with sort_col:
         sort_by = st.selectbox(
             "Sort by",
-            ["Earnings Date (soonest)", "Ticker A→Z", "Analyst", "Market Cap"],
+            ["Earnings Date (soonest)", "Ticker A→Z", "Analyst", "% of Portfolio"],
             label_visibility="collapsed",
-            key="sort_by"
+            key="sort_by",
         )
 
     sort_map = {
-        "Earnings Date (soonest)": ("days_until", True),
-        "Ticker A→Z": ("ticker", True),
-        "Analyst": ("analyst", True),
-        "Market Cap": ("market_cap", True),
+        "Earnings Date (soonest)": "days_until",
+        "Ticker A→Z":              "ticker",
+        "Analyst":                 "analyst",
+        "% of Portfolio":          "pct",
     }
-    sort_key, asc = sort_map[sort_by]
+    sort_key = sort_map[sort_by]
 
     display_rows = [r for r in rows if show_past or r["days_until"] is None or r["days_until"] >= 0]
     display_rows = sorted(
@@ -629,38 +800,41 @@ with tab_list:
         key=lambda r: (r[sort_key] is None, r[sort_key])
         if sort_key != "days_until"
         else (r["days_until"] is None, r["days_until"] if r["days_until"] is not None else 9999),
-        reverse=not asc
     )
 
     if not display_rows:
         st.info("No holdings match current filters.")
     else:
-        # Column headers
-        hcols = st.columns([1.2, 3, 1.8, 1.5, 1.5, 1.8, 1.8])
-        headers = ["TICKER", "COMPANY", "ANALYST", "SECTOR", "MKT CAP", "EARNINGS DATE", "WHEN"]
-        for col, h in zip(hcols, headers):
-            col.markdown(f'<div class="section-header" style="margin-bottom:0.25rem;">{h}</div>', unsafe_allow_html=True)
-
+        hcols = st.columns([1.2, 3, 1.8, 1.5, 1.2, 1.2, 1.8, 1.6])
+        for col, hdr in zip(
+            hcols,
+            ["TICKER", "COMPANY", "ANALYST", "SECTOR", "MKT CAP", "% PORT", "EARNINGS DATE", "WHEN"],
+        ):
+            col.markdown(
+                f'<div class="section-header" style="margin-bottom:0.25rem;">{hdr}</div>',
+                unsafe_allow_html=True,
+            )
         st.markdown('<hr style="border:none;border-top:1px solid #30363d;margin:0 0 0.5rem 0;">', unsafe_allow_html=True)
 
         for r in display_rows:
-            rcols = st.columns([1.2, 3, 1.8, 1.5, 1.5, 1.8, 1.8])
+            rcols = st.columns([1.2, 3, 1.8, 1.5, 1.2, 1.2, 1.8, 1.6])
             rcols[0].markdown(f"**`{r['ticker']}`**")
             rcols[1].markdown(r["company"])
             rcols[2].markdown(r["analyst"])
             rcols[3].markdown(f"<small style='color:#8b949e'>{r['sector']}</small>", unsafe_allow_html=True)
             rcols[4].markdown(f"<small style='color:#8b949e'>{r['market_cap']}</small>", unsafe_allow_html=True)
-            ed = r["earnings_date"]
+            rcols[5].markdown(f"<small style='color:#8b949e'>{r['pct']}</small>", unsafe_allow_html=True)
+            ed      = r["earnings_date"]
             est_tag = ' <small style="color:#d29922">~est</small>' if r["is_estimate"] and ed else ""
-            rcols[5].markdown(
+            rcols[6].markdown(
                 f"{ed.strftime('%b %d, %Y') if ed else '—'}{est_tag}",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
-            rcols[6].markdown(earnings_badge(ed), unsafe_allow_html=True)
+            rcols[7].markdown(earnings_badge(ed), unsafe_allow_html=True)
             st.markdown('<hr style="border:none;border-top:1px solid #21262d;margin:0.25rem 0;">', unsafe_allow_html=True)
 
 
-# ── CALENDAR VIEW ──────────────────────────────
+# ── CALENDAR VIEW ────────────────────────────
 with tab_cal:
     cal_col1, cal_col2, _ = st.columns([1.5, 1.5, 5])
     with cal_col1:
@@ -669,83 +843,76 @@ with tab_cal:
             index=today.month - 1,
             format_func=lambda m: calendar.month_name[m],
             label_visibility="collapsed",
-            key="cal_month"
+            key="cal_month",
         )
     with cal_col2:
         cal_year = st.selectbox(
             "Year", range(today.year, today.year + 2),
             label_visibility="collapsed",
-            key="cal_year"
+            key="cal_year",
         )
 
-    # Build a map: date → list of (ticker, analyst)
-    event_map: dict[date, list] = {}
+    event_map: dict = {}
     for r in rows:
         ed = r["earnings_date"]
         if ed and ed.month == cal_month and ed.year == cal_year:
             event_map.setdefault(ed, []).append((r["ticker"], r["analyst"]))
 
-    # Calendar grid
     cal_matrix = calendar.monthcalendar(cal_year, cal_month)
-    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_names  = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-    # Header row
     hcols = st.columns(7)
     for col, dn in zip(hcols, day_names):
         col.markdown(
-            f'<div style="text-align:center;font-family:\'IBM Plex Mono\',monospace;font-size:0.75rem;color:#8b949e;padding-bottom:4px;">{dn}</div>',
-            unsafe_allow_html=True
+            f'<div style="text-align:center;font-family:\'IBM Plex Mono\',monospace;'
+            f'font-size:0.75rem;color:#8b949e;padding-bottom:4px;">{dn}</div>',
+            unsafe_allow_html=True,
         )
 
     for week in cal_matrix:
         wcols = st.columns(7)
         for col, day in zip(wcols, week):
             if day == 0:
-                col.markdown('<div class="cal-cell" style="background:transparent;border-color:transparent;"></div>', unsafe_allow_html=True)
+                col.markdown(
+                    '<div class="cal-cell" style="background:transparent;border-color:transparent;"></div>',
+                    unsafe_allow_html=True,
+                )
                 continue
-
-            this_date = date(cal_year, cal_month, day)
-            is_today = this_date == today
+            this_date  = date(cal_year, cal_month, day)
+            is_today   = this_date == today
             cell_class = "cal-cell-today" if is_today else "cal-cell"
-            day_class = "cal-day-num-today" if is_today else "cal-day-num"
+            day_class  = "cal-day-num-today" if is_today else "cal-day-num"
+            events_html = "".join(
+                f'<div class="cal-event{" cal-event-past" if this_date < today else ""}" '
+                f'title="{t} — {a}">{t}</div>'
+                for t, a in event_map.get(this_date, [])
+            )
+            col.markdown(
+                f'<div class="{cell_class}"><div class="{day_class}">{day}</div>{events_html}</div>',
+                unsafe_allow_html=True,
+            )
 
-            events_html = ""
-            for ticker, analyst in event_map.get(this_date, []):
-                past_class = " cal-event-past" if this_date < today else ""
-                events_html += f'<div class="cal-event{past_class}" title="{ticker} — {analyst}">{ticker}</div>'
-
-            col.markdown(f"""
-            <div class="{cell_class}">
-              <div class="{day_class}">{day}</div>
-              {events_html}
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Legend for calendar
     st.markdown("""
     <div style="margin-top:1rem;display:flex;gap:1rem;align-items:center;">
       <span style="font-size:0.75rem;color:#8b949e;">Legend:</span>
       <span class="cal-event" style="position:static;">TICKER — future</span>
       <span class="cal-event cal-event-past" style="position:static;">TICKER — past</span>
-      <div style="width:12px;height:12px;border:1px solid #58a6ff;background:#0d2044;border-radius:2px;display:inline-block;"></div>
+      <div style="width:12px;height:12px;border:1px solid #58a6ff;background:#0d2044;
+          border-radius:2px;display:inline-block;"></div>
       <span style="font-size:0.75rem;color:#8b949e;">Today</span>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
-    # Upcoming events list for selected month
     if event_map:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">Events This Month</div>', unsafe_allow_html=True)
         for d in sorted(event_map.keys()):
             for ticker, analyst in event_map[d]:
-                r = next((x for x in rows if x["ticker"] == ticker), {})
-                n = days_until(d)
-                tag = earnings_badge(d)
+                row = next((x for x in rows if x["ticker"] == ticker), {})
                 st.markdown(
-                    f"**`{ticker}`** &nbsp;·&nbsp; {r.get('company','')}"
+                    f"**`{ticker}`** &nbsp;·&nbsp; {row.get('company','')}"
                     f" &nbsp;·&nbsp; {analyst}"
-                    f" &nbsp;·&nbsp; {d.strftime('%A, %B %d')} &nbsp; {tag}",
-                    unsafe_allow_html=True
+                    f" &nbsp;·&nbsp; {d.strftime('%A, %B %d')} &nbsp; {earnings_badge(d)}",
+                    unsafe_allow_html=True,
                 )
 
 
@@ -755,8 +922,8 @@ with tab_cal:
 st.markdown("<br><br>", unsafe_allow_html=True)
 st.markdown(
     '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:0.7rem;color:#30363d;text-align:center;">'
-    'MPSIF Earnings Calendar · Data via Yahoo Finance · Earnings dates may be estimates · '
-    f'Last refreshed: {datetime.now().strftime("%Y-%m-%d %H:%M")} ET'
+    f'MPSIF Earnings Calendar · Data via Yahoo Finance · Earnings dates may be estimates · '
+    f'Refreshed: {datetime.now().strftime("%Y-%m-%d %H:%M")} ET'
     '</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
