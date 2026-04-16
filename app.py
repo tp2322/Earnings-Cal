@@ -619,15 +619,8 @@ if not st.session_state.holdings:
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🏦 MPSIF")
-    st.markdown('<div class="section-header">Filter</div>', unsafe_allow_html=True)
 
     active_analysts = sorted({h["analyst"] for h in st.session_state.holdings})
-    selected_analysts = st.multiselect(
-        "Analyst",
-        options=active_analysts,
-        default=active_analysts,
-        label_visibility="collapsed",
-    )
 
     show_past = st.checkbox("Show past earnings", value=False)
 
@@ -733,20 +726,14 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # BUILD ENRICHED TABLE
 # ─────────────────────────────────────────────
-filtered = [h for h in st.session_state.holdings if h["analyst"] in selected_analysts]
-
 with st.spinner("Fetching earnings dates from Yahoo Finance…"):
     rows = []
-    for h in filtered:
+    for h in st.session_state.holdings:
         ed, call_time, is_est = fetch_earnings_date(h["ticker"])
-        info = fetch_stock_info(h["ticker"])
         rows.append({
             "ticker":        h["ticker"],
-            "company":       h.get("company") or info["name"],
-            "analyst":       h["analyst"],
-            "sector":        info["sector"],
-            "market_cap":    fmt_market_cap(info["market_cap"]),
-            "pct":           f"{h['pct']:.2f}%" if h.get("pct") else "—",
+            "company":       h.get("company") or h["ticker"],
+            "analyst":       h.get("analyst", "Unassigned"),
             "earnings_date": ed,
             "call_time":     call_time,
             "is_estimate":   is_est,
@@ -790,7 +777,7 @@ with tab_list:
     with sort_col:
         sort_by = st.selectbox(
             "Sort by",
-            ["Earnings Date (soonest)", "Ticker A→Z", "Analyst", "% of Portfolio"],
+            ["Earnings Date (soonest)", "Ticker A→Z"],
             label_visibility="collapsed",
             key="sort_by",
         )
@@ -798,8 +785,6 @@ with tab_list:
     sort_map = {
         "Earnings Date (soonest)": "days_until",
         "Ticker A→Z":              "ticker",
-        "Analyst":                 "analyst",
-        "% of Portfolio":          "pct",
     }
     sort_key = sort_map[sort_by]
 
@@ -814,11 +799,8 @@ with tab_list:
     if not display_rows:
         st.info("No holdings match current filters.")
     else:
-        hcols = st.columns([1.2, 3, 1.8, 1.5, 1.2, 1.2, 1.8, 1.6])
-        for col, hdr in zip(
-            hcols,
-            ["TICKER", "COMPANY", "ANALYST", "SECTOR", "MKT CAP", "% PORT", "EARNINGS DATE", "WHEN"],
-        ):
+        hcols = st.columns([1.5, 5, 2.5, 2])
+        for col, hdr in zip(hcols, ["TICKER", "COMPANY", "EARNINGS DATE", "WHEN"]):
             col.markdown(
                 f'<div class="section-header" style="margin-bottom:0.25rem;">{hdr}</div>',
                 unsafe_allow_html=True,
@@ -826,20 +808,16 @@ with tab_list:
         st.markdown('<hr style="border:none;border-top:1px solid #30363d;margin:0 0 0.5rem 0;">', unsafe_allow_html=True)
 
         for r in display_rows:
-            rcols = st.columns([1.2, 3, 1.8, 1.5, 1.2, 1.2, 1.8, 1.6])
+            rcols = st.columns([1.5, 5, 2.5, 2])
             rcols[0].markdown(f"**`{r['ticker']}`**")
             rcols[1].markdown(r["company"])
-            rcols[2].markdown(r["analyst"])
-            rcols[3].markdown(f"<small style='color:#8b949e'>{r['sector']}</small>", unsafe_allow_html=True)
-            rcols[4].markdown(f"<small style='color:#8b949e'>{r['market_cap']}</small>", unsafe_allow_html=True)
-            rcols[5].markdown(f"<small style='color:#8b949e'>{r['pct']}</small>", unsafe_allow_html=True)
             ed      = r["earnings_date"]
             est_tag = ' <small style="color:#d29922">~est</small>' if r["is_estimate"] and ed else ""
-            rcols[6].markdown(
+            rcols[2].markdown(
                 f"{ed.strftime('%b %d, %Y') if ed else '—'}{est_tag}",
                 unsafe_allow_html=True,
             )
-            rcols[7].markdown(earnings_badge(ed), unsafe_allow_html=True)
+            rcols[3].markdown(earnings_badge(ed), unsafe_allow_html=True)
             st.markdown('<hr style="border:none;border-top:1px solid #21262d;margin:0.25rem 0;">', unsafe_allow_html=True)
 
 
@@ -865,7 +843,7 @@ with tab_cal:
     for r in rows:
         ed = r["earnings_date"]
         if ed and ed.month == cal_month and ed.year == cal_year:
-            event_map.setdefault(ed, []).append((r["ticker"], r["analyst"]))
+            event_map.setdefault(ed, []).append(r["ticker"])
 
     cal_matrix = calendar.monthcalendar(cal_year, cal_month)
     day_names  = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -893,8 +871,8 @@ with tab_cal:
             day_class  = "cal-day-num-today" if is_today else "cal-day-num"
             events_html = "".join(
                 f'<div class="cal-event{" cal-event-past" if this_date < today else ""}" '
-                f'title="{t} — {a}">{t}</div>'
-                for t, a in event_map.get(this_date, [])
+                f'title="{t}">{t}</div>'
+                for t in event_map.get(this_date, [])
             )
             col.markdown(
                 f'<div class="{cell_class}"><div class="{day_class}">{day}</div>{events_html}</div>',
@@ -915,11 +893,10 @@ with tab_cal:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">Events This Month</div>', unsafe_allow_html=True)
         for d in sorted(event_map.keys()):
-            for ticker, analyst in event_map[d]:
+            for ticker in event_map[d]:
                 row = next((x for x in rows if x["ticker"] == ticker), {})
                 st.markdown(
                     f"**`{ticker}`** &nbsp;·&nbsp; {row.get('company','')}"
-                    f" &nbsp;·&nbsp; {analyst}"
                     f" &nbsp;·&nbsp; {d.strftime('%A, %B %d')} &nbsp; {earnings_badge(d)}",
                     unsafe_allow_html=True,
                 )
