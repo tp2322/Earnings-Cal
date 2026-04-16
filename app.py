@@ -271,7 +271,9 @@ def parse_fidelity_csv(file_bytes: bytes) -> pd.DataFrame:
     if not data_lines:
         raise ValueError("Could not find data rows in the uploaded CSV.")
 
-    df = pd.read_csv(io.StringIO("\n".join(data_lines)))
+    # index_col=False is critical: prevents pandas from treating the repeated
+    # Account Number column as a row index, which shifts all columns left by one.
+    df = pd.read_csv(io.StringIO("\n".join(data_lines)), index_col=False)
 
     # Normalise column names — strip whitespace and any BOM remnants
     df.columns = [c.strip().lstrip("\ufeff").strip() for c in df.columns]
@@ -280,10 +282,10 @@ def parse_fidelity_csv(file_bytes: bytes) -> pd.DataFrame:
     df["Symbol"]      = df["Symbol"].fillna("").astype(str).str.strip()
     df["Description"] = df["Description"].fillna("").astype(str).str.strip()
 
-    # Drop non-equity rows
+    # Drop non-equity rows (money market, pending activity, blank symbols)
     df = df[df["Symbol"] != ""]
     df = df[~df["Symbol"].isin(SKIP_SYMBOLS)]
-    df = df[~df["Description"].str.lower().str.contains("pending", na=False)]
+    df = df[~df["Description"].str.lower().str.contains("pending|money market", na=False)]
 
     # Sanitise numeric columns — strip $, +, commas, % before casting
     for col in ["Last Price", "Current Value", "Percent Of Account", "Quantity"]:
@@ -663,6 +665,18 @@ with st.sidebar:
             st.session_state.holdings = [h for h in st.session_state.holdings if h["ticker"] != remove_ticker]
             save_holdings(st.session_state.holdings)
             st.success(f"Removed {remove_ticker}")
+            st.rerun()
+
+    with st.expander("⚠️ Clear All Data"):
+        st.caption("Wipes the cached holdings and forces a fresh CSV upload.")
+        if st.button("Clear & Re-upload", type="primary"):
+            st.session_state.holdings       = []
+            st.session_state.upload_meta    = {}
+            st.session_state.pending_import = None
+            st.session_state.show_upload    = True
+            for f in [HOLDINGS_FILE, UPLOAD_META_FILE]:
+                if os.path.exists(f):
+                    os.remove(f)
             st.rerun()
 
     st.markdown('<div class="section-header" style="margin-top:1.5rem;">Email Reminders</div>', unsafe_allow_html=True)
