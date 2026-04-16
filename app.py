@@ -272,28 +272,37 @@ def parse_fidelity_csv(file_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Could not find data rows in the uploaded CSV.")
 
     df = pd.read_csv(io.StringIO("\n".join(data_lines)))
-    df.columns = [c.strip().lstrip("\ufeff") for c in df.columns]
+
+    # Normalise column names — strip whitespace and any BOM remnants
+    df.columns = [c.strip().lstrip("\ufeff").strip() for c in df.columns]
+
+    # Cast Symbol and Description to str early so .str accessor always works
+    df["Symbol"]      = df["Symbol"].fillna("").astype(str).str.strip()
+    df["Description"] = df["Description"].fillna("").astype(str).str.strip()
 
     # Drop non-equity rows
-    df = df[df["Symbol"].notna()]
-    df = df[~df["Symbol"].str.strip().isin(SKIP_SYMBOLS)]
+    df = df[df["Symbol"] != ""]
+    df = df[~df["Symbol"].isin(SKIP_SYMBOLS)]
     df = df[~df["Description"].str.lower().str.contains("pending", na=False)]
 
-    # Sanitise numeric columns
+    # Sanitise numeric columns — strip $, +, commas, % before casting
     for col in ["Last Price", "Current Value", "Percent Of Account", "Quantity"]:
         if col in df.columns:
             df[col] = (
-                df[col].astype(str)
+                df[col].fillna("").astype(str)
                 .str.replace(r"[$+,%]", "", regex=True)
                 .str.strip()
+                .replace("", float("nan"))
             )
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["Symbol"]      = df["Symbol"].str.strip()
-    df["Description"] = df["Description"].str.strip().str.title()
+    # Title-case company names now that Description is guaranteed a str column
+    df["Description"] = df["Description"].str.title()
 
     keep = ["Symbol", "Description", "Quantity", "Last Price",
             "Current Value", "Percent Of Account"]
+    # Only keep columns that actually exist (future-proof against export format changes)
+    keep = [c for c in keep if c in df.columns]
     return df[keep].reset_index(drop=True)
 
 
