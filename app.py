@@ -313,41 +313,88 @@ def parse_fidelity_csv(file_bytes: bytes) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_earnings_date(ticker: str):
+    """
+    Try four yfinance methods in order of reliability.
+    Returns (date | None, call_time_str, is_estimate_bool).
+    """
     try:
         tk = yf.Ticker(ticker)
+        today_naive = date.today()
+        today_ts    = pd.Timestamp.today(tz="UTC")
+
+        # ── Method 1: calendar dict (most reliable for next event) ──
+        try:
+            cal = tk.calendar
+            if isinstance(cal, dict):
+                raw = cal.get("Earnings Date")
+                if raw:
+                    # can be a list of timestamps or a single value
+                    if not isinstance(raw, (list, tuple)):
+                        raw = [raw]
+                    for val in raw:
+                        try:
+                            d = pd.Timestamp(val).date()
+                            if d >= today_naive - pd.Timedelta(days=5).to_pytimedelta():
+                                return d, "", True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # ── Method 2: earnings_dates DataFrame ──
         try:
             edf = tk.earnings_dates
             if edf is not None and not edf.empty:
-                today_ts = pd.Timestamp.today(tz="UTC")
-                window   = today_ts + pd.Timedelta(days=365)
-                future   = edf[
+                window = today_ts + pd.Timedelta(days=400)
+                future = edf[
                     (edf.index >= today_ts - pd.Timedelta(days=5)) &
                     (edf.index <= window)
                 ]
                 if not future.empty:
-                    next_date = future.index.min()
-                    eps_est   = future.loc[next_date, "EPS Estimate"] if "EPS Estimate" in future.columns else None
-                    is_est    = pd.isna(eps_est)
+                    next_ts   = future.index.min()
+                    eps_est   = future.loc[next_ts, "EPS Estimate"] if "EPS Estimate" in future.columns else None
+                    is_est    = True if eps_est is None else pd.isna(eps_est)
                     call_time = ""
                     if "Call Time" in future.columns:
-                        v = future.loc[next_date, "Call Time"]
-                        call_time = "" if pd.isna(v) else str(v)
-                    return next_date.date(), call_time, is_est
+                        v = future.loc[next_ts, "Call Time"]
+                        call_time = "" if (v is None or pd.isna(v)) else str(v)
+                    return next_ts.date(), call_time, is_est
         except Exception:
             pass
 
-        info = tk.info
-        for key in ("earningsDate", "earningsTimestamp", "earningsTimestampStart"):
-            raw = info.get(key)
-            if raw:
+        # ── Method 3: info dict timestamp fields ──
+        try:
+            info = tk.info or {}
+            for key in ("earningsDate", "earningsTimestamp", "earningsTimestampStart"):
+                raw = info.get(key)
+                if raw is None:
+                    continue
                 if isinstance(raw, (list, tuple)):
-                    raw = raw[0]
-                try:
-                    return datetime.fromtimestamp(int(raw)).date(), "", True
-                except Exception:
-                    pass
+                    raw = raw[0] if raw else None
+                if raw:
+                    try:
+                        d = datetime.fromtimestamp(int(raw)).date()
+                        if d >= today_naive:
+                            return d, "", True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # ── Method 4: fast_info (newer yfinance versions) ──
+        try:
+            fi = tk.fast_info
+            raw = getattr(fi, "earnings_date", None) or getattr(fi, "earningsDate", None)
+            if raw:
+                d = pd.Timestamp(raw).date()
+                if d >= today_naive:
+                    return d, "", True
+        except Exception:
+            pass
+
     except Exception:
         pass
+
     return None, "", True
 
 
